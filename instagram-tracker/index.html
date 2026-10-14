@@ -117,6 +117,25 @@ ul.people li:last-child { border-bottom: none; }
 .pill.lost { background: var(--lost-soft); color: var(--lost); }
 .pill.gain { background: var(--gain-soft); color: var(--gain); }
 .empty { padding: 32px 16px; text-align: center; color: var(--muted); }
+.filters { gap: 8px 18px; font-size: 14px; }
+.filters .f { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 500; }
+.filters .f input { flex: none; width: 84px; }
+.filters .chk { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); cursor: pointer; }
+.filters .chk input { accent-color: var(--accent); width: 16px; height: 16px; }
+.showing { padding: 10px 16px 0; font-size: 13px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.showing button { padding: 2px 10px; font-size: 13px; }
+ul.people li { flex-wrap: wrap; }
+ul.people li.is-hidden { opacity: 0.55; }
+.who { flex: 1 1 170px; }
+.ctrls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ctrls input.cnt {
+  width: 92px; font: inherit; font-family: var(--font-mono); font-size: 13px; padding: 4px 8px;
+  border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); text-align: right;
+}
+.ctrls input.cnt[aria-invalid="true"] { border-color: var(--lost); color: var(--lost); }
+.ctrls button.tog[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.badge { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; }
+.meta-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* history */
 .history { display: flex; flex-direction: column; gap: 12px; }
@@ -160,6 +179,7 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
         <li>Start the export. Instagram emails you when it’s ready, usually within minutes.</li>
         <li>Download the zip and drop it above. Repeat every week or two: each new export is compared with the last one to find who unfollowed you.</li>
       </ol>
+      <p class="muted" style="margin-top:10px;max-width:70ch">The export doesn’t include other accounts’ follower counts. Type them into the box on each row (like <code>850</code>, <code>12k</code> or <code>2.4m</code>) to use the follower filter. Counts, Big tags and hidden accounts are remembered across exports.</p>
     </details>
   </section>
 
@@ -180,9 +200,25 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
           <option value="az">A → Z</option>
           <option value="new">Newest first</option>
           <option value="old">Oldest first</option>
+          <option value="most">Most followers</option>
+          <option value="fewest">Fewest followers</option>
         </select>
         <button id="copy" type="button">Copy list</button>
       </div>
+      <div class="toolbar filters">
+        <label class="f" for="cmpN">Followers
+          <select id="cmpOp" aria-label="Follower filter">
+            <option value="any">Any</option>
+            <option value="under">Under</option>
+            <option value="over">Over</option>
+          </select>
+          <input id="cmpN" type="text" inputmode="decimal" placeholder="10k" aria-label="Follower count limit">
+        </label>
+        <label class="chk"><input type="checkbox" id="incUnknown" checked> Include accounts with no count</label>
+        <label class="chk"><input type="checkbox" id="hideBig"> Hide big accounts</label>
+        <label class="chk"><input type="checkbox" id="showHidden"> Show hidden <span id="hiddenN"></span></label>
+      </div>
+      <p class="showing" id="showing"></p>
       <ul class="people" id="list"></ul>
     </div>
   </section>
@@ -205,8 +241,9 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
 (function () {
   const STORE = "followLedger.v1";
   const $ = (id) => document.getElementById(id);
-  let state = { snapshots: [], demo: false, baselineId: null, tab: "nfb" };
+  let state = { snapshots: [], meta: {}, demo: false, baselineId: null, tab: "nfb" };
   let pendingDelete = null;
+  let lastHidden = null;
 
   /* ---------- storage ---------- */
   function load() {
@@ -214,15 +251,42 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
       const raw = localStorage.getItem(STORE);
       if (raw) {
         const s = JSON.parse(raw);
-        if (s && Array.isArray(s.snapshots) && s.snapshots.length) { state = Object.assign(state, s); return; }
+        if (s && Array.isArray(s.snapshots) && (s.snapshots.length || (s.meta && Object.keys(s.meta).length))) {
+          state = Object.assign(state, s); state.meta = s.meta || {}; return;
+        }
       }
     } catch (e) {}
-    state.snapshots = makeDemo();
+    const demo = makeDemo();
+    state.snapshots = demo.snapshots;
+    state.meta = demo.meta;
     state.demo = true;
   }
   function save() {
     if (state.demo) return;
-    try { localStorage.setItem(STORE, JSON.stringify({ snapshots: state.snapshots, baselineId: state.baselineId })); } catch (e) {}
+    try { localStorage.setItem(STORE, JSON.stringify({ snapshots: state.snapshots, meta: state.meta, baselineId: state.baselineId })); } catch (e) {}
+  }
+
+  /* ---------- per-account notes: follower count, big tag, hidden ---------- */
+  const meta = (u) => state.meta[u] || {};
+  function setMeta(u, patch) {
+    const m = Object.assign({}, meta(u), patch);
+    if (m.count == null) delete m.count;
+    if (!m.big) delete m.big;
+    if (!m.hidden) delete m.hidden;
+    if (Object.keys(m).length) state.meta[u] = m; else delete state.meta[u];
+    save();
+  }
+  function parseCount(s) {
+    const m = String(s || "").trim().toLowerCase()
+      .replace(/,(\d{1,2})\s*([km])$/, ".$1$2").replace(/,/g, "").match(/^(\d+(?:\.\d+)?)\s*([km])?$/);
+    if (!m) return null;
+    return Math.round(parseFloat(m[1]) * (m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1));
+  }
+  function fmtCount(n) {
+    if (n == null) return "";
+    if (n >= 1e6) return +(n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "m";
+    if (n >= 1e4) return +(n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + "k";
+    return String(n);
   }
 
   /* ---------- parsing ---------- */
@@ -301,7 +365,7 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     if (!found.following) return showMsg("err", "Found your followers but not who you follow. Add following.json too.");
 
     const snap = { id: "s" + Date.now().toString(36), date, followers: dedupe(followers), following: dedupe(following) };
-    if (state.demo) { state.snapshots = []; state.demo = false; state.baselineId = null; }
+    if (state.demo) { state.snapshots = []; state.meta = {}; state.demo = false; state.baselineId = null; }
     const key = (s) => s.followers.map((x) => x.u).sort().join(",") + "|" + s.following.map((x) => x.u).sort().join(",");
     if (state.snapshots.some((s) => key(s) === key(snap))) {
       showMsg("ok", "This export matches a snapshot you already have, so nothing new was added.");
@@ -356,6 +420,8 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
   const fmtTs = (t) => (t ? fmtDate(t * 1000) : null);
   const hue = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
 
+  const notHidden = (list) => list.filter((x) => !meta(x.u).hidden);
+
   function render() {
     const cur = current(), base = baseline(), d = compute();
     $("demoBar").hidden = !state.demo;
@@ -363,8 +429,8 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     $("tiles").innerHTML = [
       ["", cur.followers.length, "Followers"],
       ["", cur.following.length, "Following"],
-      ["accent", d.nfb.length, "Don’t follow you back"],
-      ["lost", base ? d.unf.length : "–", "Unfollowed you"],
+      ["accent", notHidden(d.nfb).length, "Don’t follow you back"],
+      ["lost", base ? notHidden(d.unf).length : "–", "Unfollowed you"],
     ].map(([c, n, l]) => `<div class="tile ${c}"><span class="n">${n}</span><span class="l">${l}</span></div>`).join("");
 
     $("compareLine").innerHTML = base
@@ -373,7 +439,7 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
 
     $("tabs").innerHTML = TABS.map((t) => {
       const needsBase = t.id === "unf" || t.id === "gained";
-      const n = needsBase && !base ? "–" : d[t.id].length;
+      const n = needsBase && !base ? "–" : notHidden(d[t.id]).length;
       return `<button class="tab" role="tab" type="button" data-tab="${t.id}" aria-selected="${state.tab === t.id}">${t.label}<span class="c">${n}</span></button>`;
     }).join("");
     $("tabDesc").textContent = TABS.find((t) => t.id === state.tab).desc;
@@ -381,37 +447,78 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     renderSnaps();
   }
 
+  function filterState() {
+    const op = $("cmpOp").value, n = parseCount($("cmpN").value);
+    return { op: op !== "any" && n != null ? op : "any", n, incUnknown: $("incUnknown").checked,
+      hideBig: $("hideBig").checked, showHidden: $("showHidden").checked };
+  }
+
   function currentRows(d) {
     const q = $("q").value.trim().toLowerCase().replace(/^@/, "");
-    let rows = d[state.tab].filter((x) => !q || x.u.includes(q));
+    const f = filterState();
+    let rows = d[state.tab].filter((x) => {
+      const m = meta(x.u);
+      if (q && !x.u.includes(q)) return false;
+      if (m.hidden && !f.showHidden) return false;
+      if (m.big && f.hideBig) return false;
+      if (f.op !== "any") {
+        if (m.count == null) return f.incUnknown;
+        return f.op === "under" ? m.count < f.n : m.count > f.n;
+      }
+      return true;
+    });
     const s = $("sort").value;
+    const cnt = (x, dflt) => (meta(x.u).count == null ? dflt : meta(x.u).count);
     rows = rows.slice().sort((a, b) =>
-      s === "az" ? a.u.localeCompare(b.u) : s === "new" ? (b.t || 0) - (a.t || 0) : (a.t || Infinity) - (b.t || Infinity));
+      s === "az" ? a.u.localeCompare(b.u)
+      : s === "new" ? (b.t || 0) - (a.t || 0)
+      : s === "old" ? (a.t || Infinity) - (b.t || Infinity)
+      : s === "most" ? cnt(b, -1) - cnt(a, -1)
+      : cnt(a, Infinity) - cnt(b, Infinity));
     return rows;
+  }
+
+  function renderShowing(d, shown) {
+    const all = d[state.tab], hiddenN = all.length - notHidden(all).length;
+    $("hiddenN").textContent = hiddenN ? `(${hiddenN})` : "";
+    const total = notHidden(all).length;
+    let html = shown === total && !$("showHidden").checked ? "" : `<span>Showing ${shown} of ${total}${$("showHidden").checked && hiddenN ? ` plus ${hiddenN} hidden` : ""}</span>`;
+    if (lastHidden) html += `<span>Hid <b>@${esc(lastHidden)}</b>.</span><button type="button" id="undoHide">Undo</button>`;
+    $("showing").innerHTML = html;
+    $("showing").hidden = !html;
   }
 
   function renderList(d, base) {
     const list = $("list");
+    const focusId = document.activeElement && document.activeElement.id;
     if ((state.tab === "unf" || state.tab === "gained") && !base) {
       list.innerHTML = `<li class="empty">You need two snapshots for this. Add another export in a week or two and the changes appear here.</li>`;
+      $("showing").hidden = true;
       return;
     }
     const rows = currentRows(d);
+    renderShowing(d, rows.filter((x) => !meta(x.u).hidden).length);
     if (!rows.length) {
-      const q = $("q").value.trim();
-      list.innerHTML = `<li class="empty">${q ? "No usernames match that search." : state.tab === "unf" ? "Nobody unfollowed you between these snapshots." : "Nobody here."}</li>`;
+      const filtered = $("q").value.trim() || filterState().op !== "any" || $("hideBig").checked;
+      list.innerHTML = `<li class="empty">${filtered ? "No accounts match these filters." : state.tab === "unf" ? "Nobody unfollowed you between these snapshots." : "Nobody here."}</li>`;
       return;
     }
     const verb = { nfb: "You followed them", fans: "Followed you", unf: "Had followed you since", gained: "Followed you" }[state.tab];
     list.innerHTML = rows.map((x) => {
-      const when = fmtTs(x.t);
+      const when = fmtTs(x.t), m = meta(x.u), u = esc(x.u);
       const pill = state.tab === "unf" ? (x.stillFollowing ? `<span class="pill lost">You still follow</span>` : "")
         : state.tab === "gained" ? `<span class="pill gain">New</span>` : "";
-      return `<li>
+      return `<li class="${m.hidden ? "is-hidden" : ""}">
         <span class="avatar" style="background:hsl(${hue(x.u)} 45% 48%)" aria-hidden="true">${esc(x.u[0].toUpperCase())}</span>
-        <span class="who"><a href="https://www.instagram.com/${encodeURIComponent(x.u)}/" target="_blank" rel="noopener">@${esc(x.u)}</a>
-        ${when ? `<span class="meta">${verb} ${when}</span>` : ""}</span>${pill}</li>`;
+        <span class="who"><span><a href="https://www.instagram.com/${encodeURIComponent(x.u)}/" target="_blank" rel="noopener">@${u}</a>${m.big ? `<span class="badge">Big</span>` : ""}</span>
+        <span class="meta-line">${when ? `<span class="meta">${verb} ${when}</span>` : ""}${pill}</span></span>
+        <span class="ctrls">
+          <input class="cnt" id="cnt-${u}" data-cnt="${u}" type="text" inputmode="decimal" value="${fmtCount(m.count)}" placeholder="followers" aria-label="Follower count for @${u}">
+          <button class="small tog" type="button" data-big="${u}" aria-pressed="${!!m.big}">Big</button>
+          <button class="small" type="button" data-hide="${u}">${m.hidden ? "Unhide" : "Hide"}</button>
+        </span></li>`;
     }).join("");
+    if (focusId) { const el = document.getElementById(focusId); if (el) el.focus(); }
   }
 
   function renderSnaps() {
@@ -450,10 +557,18 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     const u = (n) => ({ u: n, t: ts() });
     const followingOld = all.slice(0, 48).map(u), followersOld = all.slice(10, 66).map(u);
     const lost = new Set(all.slice(20, 26)), gainedNew = all.slice(66, 70).map(u);
-    return [
-      { id: "demo1", date: now - 14 * day, followers: followersOld, following: followingOld },
-      { id: "demo2", date: now - 1 * day, followers: followersOld.filter((x) => !lost.has(x.u)).concat(gainedNew), following: followingOld },
-    ];
+    const demoMeta = {};
+    [[0, 2400000, true], [1, 860000, true], [2, 412], [3, 1280], [4, 37500], [5, 690], [7, 15200]].forEach(([i, count, big]) => {
+      demoMeta[all[i]] = big ? { count, big } : { count };
+    });
+    demoMeta[all[9]] = { hidden: true };
+    return {
+      meta: demoMeta,
+      snapshots: [
+        { id: "demo1", date: now - 14 * day, followers: followersOld, following: followingOld },
+        { id: "demo2", date: now - 1 * day, followers: followersOld.filter((x) => !lost.has(x.u)).concat(gainedNew), following: followingOld },
+      ],
+    };
   }
 
   /* ---------- events ---------- */
@@ -470,8 +585,55 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     const t = e.target.closest("[data-tab]"); if (!t) return;
     state.tab = t.dataset.tab; render();
   });
-  $("q").addEventListener("input", () => renderList(compute(), baseline()));
-  $("sort").addEventListener("change", () => renderList(compute(), baseline()));
+  const relist = () => renderList(compute(), baseline());
+  $("q").addEventListener("input", relist);
+  $("sort").addEventListener("change", relist);
+  ["cmpOp", "incUnknown", "hideBig", "showHidden"].forEach((id) => $(id).addEventListener("change", relist));
+  $("cmpN").addEventListener("input", relist);
+
+  /* row controls */
+  function commitCount(input) {
+    const raw = input.value.trim(), n = raw ? parseCount(raw) : null;
+    if (raw && n == null) { input.setAttribute("aria-invalid", "true"); return false; }
+    input.removeAttribute("aria-invalid");
+    if (n === (meta(input.dataset.cnt).count ?? null)) { input.value = fmtCount(n); return false; }
+    setMeta(input.dataset.cnt, { count: n });
+    input.value = fmtCount(n);
+    return true;
+  }
+  const countAffectsList = () => filterState().op !== "any" || /most|fewest/.test($("sort").value);
+  $("list").addEventListener("change", (e) => {
+    if (!e.target.dataset.cnt) return;
+    if (commitCount(e.target) && countAffectsList()) relist();
+  });
+  $("list").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !e.target.dataset.cnt) return;
+    e.preventDefault();
+    const inputs = [...$("list").querySelectorAll("input.cnt")];
+    const next = inputs[inputs.indexOf(e.target) + 1];
+    const nextId = next && next.id;
+    const changed = commitCount(e.target);
+    if (changed && countAffectsList()) relist();
+    const el = nextId && document.getElementById(nextId);
+    if (el) { el.focus(); el.select(); } else e.target.blur();
+  });
+  $("list").addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.dataset.big) { setMeta(t.dataset.big, { big: !meta(t.dataset.big).big }); render(); }
+    else if (t.dataset.hide) {
+      const u = t.dataset.hide, hide = !meta(u).hidden;
+      setMeta(u, { hidden: hide });
+      lastHidden = hide ? u : null;
+      render();
+    }
+  });
+  $("showing").addEventListener("click", (e) => {
+    if (e.target.id !== "undoHide" || !lastHidden) return;
+    setMeta(lastHidden, { hidden: false });
+    lastHidden = null;
+    render();
+  });
+  $("tabs").addEventListener("click", () => { lastHidden = null; }, true);
   $("copy").addEventListener("click", () => {
     const btn = $("copy");
     const text = currentRows(compute()).map((x) => x.u).join("\n");
@@ -479,7 +641,7 @@ footer { font-size: 13px; color: var(--muted); max-width: 70ch; display: flex; f
     try { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); } catch (e) { done(false); }
   });
   $("clearDemo").addEventListener("click", () => {
-    state.snapshots = []; state.demo = false;
+    state.snapshots = []; state.meta = {}; state.demo = false; lastHidden = null;
     render();
   });
   $("snaps").addEventListener("click", (e) => {
